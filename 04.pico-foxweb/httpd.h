@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 // Client request
 extern char *method, // "GET" or "POST"
@@ -12,9 +13,11 @@ extern char *method, // "GET" or "POST"
     *payload;        // for POST
 
 extern int payload_size;
+extern char *client_ip;
 
 // Server control functions
 void serve_forever(const char *PORT);
+void log_access(const char *status, int response_size);
 
 char *request_header(const char *name);
 
@@ -25,7 +28,6 @@ static header_t reqhdr[17] = {{"\0", "\0"}};
 header_t *request_headers(void);
 
 // user shall implement this function
-
 void route();
 
 // Response
