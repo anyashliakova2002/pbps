@@ -1,16 +1,11 @@
 #include "httpd.h"
-
-#include <arpa/inet.h>
-#include <ctype.h>
-#include <netdb.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/mman.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
-#include <time.h>
+#include <sys/mman.h>
+#include <signal.h>
+#include <ctype.h>
 
 #define MAX_CONNECTIONS 1000
 #define BUF_SIZE 65535
@@ -19,19 +14,89 @@
 
 static int listenfd;
 int *clients;
-static void start_server(const char *);
-static void respond(int);
-
 static char *buf;
-char *client_ip;
 
-// Client request
-char *method, *uri, *qs, *prot, *payload;
-int payload_size;
+// Initialize SSL
+void init_openssl() {
+    SSL_load_error_strings();
+    OpenSSL_add_ssl_algorithms();
+}
 
+SSL_CTX *create_context() {
+    const SSL_METHOD *method = TLS_server_method();
+    SSL_CTX *ctx = SSL_CTX_new(method);
+    if (!ctx) {
+        perror("Unable to create SSL context");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    return ctx;
+}
+
+void configure_context(SSL_CTX *ctx, const char *cert_file, const char *key_file) {
+    SSL_CTX_set_ecdh_auto(ctx, 1);
+    if (SSL_CTX_use_certificate_file(ctx, cert_file, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+    if (SSL_CTX_use_PrivateKey_file(ctx, key_file, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+}
+
+void cleanup_openssl() {
+    SSL_CTX_free(ssl_ctx);
+    EVP_cleanup();
+}
+
+// PAM authentication
+static int pam_conv_func(int num_msg, const struct pam_message **msg,
+                        struct pam_response **resp, void *appdata_ptr) {
+    pam_conv_data *data = (pam_conv_data *)appdata_ptr;
+    struct pam_response *response = calloc(num_msg, sizeof(struct pam_response));
+    
+    for (int i = 0; i < num_msg; i++) {
+        switch (msg[i]->msg_style) {
+            case PAM_PROMPT_ECHO_OFF:
+                response[i].resp = strdup(data->password);
+                break;
+            case PAM_PROMPT_ECHO_ON:
+                response[i].resp = strdup(data->username);
+                break;
+            default:
+                response[i].resp = NULL;
+                break;
+        }
+    }
+    
+    *resp = response;
+    return PAM_SUCCESS;
+}
+
+int pam_authenticate_user(const char *username, const char *password) {
+    pam_handle_t *pamh = NULL;
+    pam_conv_data data = { (char*)username, (char*)password };
+    struct pam_conv conv = { pam_conv_func, &data };
+    
+    int ret = pam_start("httpd", username, &conv, &pamh);
+    if (ret != PAM_SUCCESS) return 0;
+    
+    ret = pam_authenticate(pamh, 0);
+    if (ret != PAM_SUCCESS) {
+        pam_end(pamh, ret);
+        return 0;
+    }
+    
+    ret = pam_acct_mgmt(pamh, 0);
+    pam_end(pamh, ret);
+    return ret == PAM_SUCCESS;
+}
+
+// Logging
 void log_access(const char *status, int response_size) {
     FILE *log_file = fopen(LOG_FILE, "a");
-    if (log_file == NULL) {
+    if (!log_file) {
         perror("Failed to open log file");
         return;
     }
@@ -42,103 +107,47 @@ void log_access(const char *status, int response_size) {
     char timestamp[128];
     strftime(timestamp, sizeof(timestamp), "%d/%b/%Y:%H:%M:%S %z", tm);
 
-    const char *user_agent = request_header("User-Agent");
-    if (!user_agent) user_agent = "-";
-    
-    const char *referer = request_header("Referer");
-    if (!referer) referer = "-";
+    const char *user_agent = request_header("User-Agent") ?: "-";
+    const char *referer = request_header("Referer") ?: "-";
 
     fprintf(log_file, "%s - - [%s] \"%s %s %s\" %s %d \"%s\" \"%s\"\n",
-            client_ip,
-            timestamp,
-            method,
-            uri,
-            prot,
-            status,
-            response_size,
-            referer,
-            user_agent);
+            client_ip, timestamp, method, uri, prot, status, response_size, referer, user_agent);
 
     fclose(log_file);
 }
 
-void serve_forever(const char *PORT) {
-    struct sockaddr_in clientaddr;
-    socklen_t addrlen;
-    int slot = 0;
-
-    printf("Server started %shttp://127.0.0.1:%s%s\n", "\033[92m", PORT, "\033[0m");
-
-    clients = mmap(NULL, sizeof(*clients) * MAX_CONNECTIONS,
-                  PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
-
-    int i;
-    for (i = 0; i < MAX_CONNECTIONS; i++)
-        clients[i] = -1;
-    start_server(PORT);
-
-    signal(SIGCHLD, SIG_IGN);
-
-    while (1) {
-        addrlen = sizeof(clientaddr);
-        clients[slot] = accept(listenfd, (struct sockaddr *)&clientaddr, &addrlen);
-
-        if (clients[slot] < 0) {
-            perror("accept() error");
-            exit(1);
-        } else {
-            client_ip = inet_ntoa(clientaddr.sin_addr);
-            if (fork() == 0) {
-                close(listenfd);
-                respond(slot);
-                close(clients[slot]);
-                clients[slot] = -1;
-                exit(0);
-            } else {
-                close(clients[slot]);
-            }
-        }
-
-        while (clients[slot] != -1)
-            slot = (slot + 1) % MAX_CONNECTIONS;
-    }
-}
-
-// start server
+// Server functions
 void start_server(const char *port) {
-  struct addrinfo hints, *res, *p;
+    struct addrinfo hints, *res, *p;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
 
-  // getaddrinfo for host
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_STREAM;
-  hints.ai_flags = AI_PASSIVE;
-  if (getaddrinfo(NULL, port, &hints, &res) != 0) {
-    perror("getaddrinfo() error");
-    exit(1);
-  }
-  // socket and bind
-  for (p = res; p != NULL; p = p->ai_next) {
-    int option = 1;
-    listenfd = socket(p->ai_family, p->ai_socktype, 0);
-    setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
-    if (listenfd == -1)
-      continue;
-    if (bind(listenfd, p->ai_addr, p->ai_addrlen) == 0)
-      break;
-  }
-  if (p == NULL) {
-    perror("socket() or bind()");
-    exit(1);
-  }
+    if (getaddrinfo(NULL, port, &hints, &res) != 0) {
+        perror("getaddrinfo() error");
+        exit(1);
+    }
 
-  freeaddrinfo(res);
+    for (p = res; p != NULL; p = p->ai_next) {
+        int option = 1;
+        listenfd = socket(p->ai_family, p->ai_socktype, 0);
+        setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
+        if (listenfd == -1) continue;
+        if (bind(listenfd, p->ai_addr, p->ai_addrlen) == 0) break;
+    }
 
-  // listen for incoming connections
-  if (listen(listenfd, QUEUE_SIZE) != 0) {
-    perror("listen() error");
-    exit(1);
-  }
+    if (p == NULL) {
+        perror("socket() or bind()");
+        exit(1);
+    }
+
+    freeaddrinfo(res);
+
+    if (listen(listenfd, QUEUE_SIZE) != 0) {
+        perror("listen() error");
+        exit(1);
+    }
 }
 
 // get request header by name
