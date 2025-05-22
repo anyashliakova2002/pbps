@@ -1,39 +1,57 @@
 #include "httpd.h"
 #include <sys/stat.h>
+#include <stdlib.h>
 
 #define CHUNK_SIZE 1024
 #define PUBLIC_DIR "./webroot"
 #define INDEX_HTML "/index.html"
 #define NOT_FOUND_HTML "/404.html"
 
-int main(int c, char **v) {
-    char *port = c == 1 ? "8000" : v[1];
-    serve_forever(port);
-    return 0;
+int check_auth() {
+    char *auth_header = request_header("Authorization");
+    if (!auth_header || strncmp(auth_header, "Basic ", 6) != 0) return 0;
+    
+    char *encoded = auth_header + 6;
+    char *decoded = base64_decode(encoded);
+    if (!decoded) return 0;
+    
+    char *sep = strchr(decoded, ':');
+    if (!sep) {
+        free(decoded);
+        return 0;
+    }
+    
+    *sep = '\0';
+    int auth_result = pam_authenticate_user(decoded, sep + 1);
+    free(decoded);
+    return auth_result;
+}
+
+void require_auth() {
+    HTTP_401;
+    printf("Authentication required\n");
 }
 
 int file_exists(const char *file_name) {
     struct stat buffer;
-    return (stat(file_name, &buffer) == 0);
+    return stat(file_name, &buffer) == 0;
 }
 
 int read_file(const char *file_name, int *total_size) {
     char buf[CHUNK_SIZE];
-    FILE *file;
-    size_t nread;
-    int err = 1;
+    FILE *file = fopen(file_name, "r");
     *total_size = 0;
-
-    file = fopen(file_name, "r");
+    
     if (file) {
-        while ((nread = fread(buf, 1, sizeof buf, file)) {
+        size_t nread;
+        while ((nread = fread(buf, 1, sizeof(buf), file)) {
             fwrite(buf, 1, nread, stdout);
             *total_size += nread;
         }
-        err = ferror(file);
         fclose(file);
+        return 0;
     }
-    return err;
+    return 1;
 }
 
 void route() {
@@ -42,9 +60,21 @@ void route() {
     
     ROUTE_START()
 
+    GET("/secure") {
+        if (!check_auth()) {
+            require_auth();
+            status = "401";
+        } else {
+            HTTP_200;
+            printf("Welcome to secure area!\n");
+            response_size = strlen("Welcome to secure area!\n");
+            status = "200";
+        }
+    }
+
     GET("/") {
-        char index_html[20];
-        sprintf(index_html, "%s%s", PUBLIC_DIR, INDEX_HTML);
+        char index_html[256];
+        snprintf(index_html, sizeof(index_html), "%s%s", PUBLIC_DIR, INDEX_HTML);
 
         HTTP_200;
         if (file_exists(index_html)) {
@@ -52,43 +82,15 @@ void route() {
         } else {
             char *msg = "Hello! You are using %s\n\n";
             char *user_agent = request_header("User-Agent");
-            printf(msg, user_agent);
-            response_size = strlen(msg) + (user_agent ? strlen(user_agent) : 0);
+            printf(msg, user_agent ? user_agent : "unknown");
+            response_size = strlen(msg) + (user_agent ? strlen(user_agent) : 7);
         }
         status = "200";
-    }
-
-    GET("/test") {
-        HTTP_200;
-        printf("List of request headers:\n\n");
-        response_size += strlen("List of request headers:\n\n");
-
-        header_t *h = request_headers();
-        while (h->name) {
-            printf("%s: %s\n", h->name, h->value);
-            response_size += strlen(h->name) + strlen(h->value) + 3;
-            h++;
-        }
-        status = "200";
-    }
-
-    POST("/") {
-        HTTP_201;
-        char *msg1 = "Wow, seems that you POSTed %d bytes.\n";
-        char *msg2 = "Fetch the data using `payload` variable.\n";
-        printf(msg1, payload_size);
-        printf(msg2);
-        response_size = strlen(msg1) + strlen(msg2) + 20;
-        if (payload_size > 0) {
-            printf("Request body: %s", payload);
-            response_size += strlen(payload) + 13;
-        }
-        status = "201";
     }
 
     GET(uri) {
-        char file_name[255];
-        sprintf(file_name, "%s%s", PUBLIC_DIR, uri);
+        char file_name[512];
+        snprintf(file_name, sizeof(file_name), "%s%s", PUBLIC_DIR, uri);
 
         if (file_exists(file_name)) {
             HTTP_200;
@@ -96,7 +98,7 @@ void route() {
             status = "200";
         } else {
             HTTP_404;
-            sprintf(file_name, "%s%s", PUBLIC_DIR, NOT_FOUND_HTML);
+            snprintf(file_name, sizeof(file_name), "%s%s", PUBLIC_DIR, NOT_FOUND_HTML);
             if (file_exists(file_name)) {
                 read_file(file_name, &response_size);
             } else {
@@ -111,4 +113,17 @@ void route() {
     ROUTE_END()
     
     log_access(status, response_size);
+}
+
+int main(int argc, char **argv) {
+    char *port = argc == 1 ? "8000" : argv[1];
+    
+    init_openssl();
+    ssl_ctx = create_context();
+    configure_context(ssl_ctx, "cert.pem", "key.pem");
+    
+    serve_forever(port);
+    
+    cleanup_openssl();
+    return 0;
 }
