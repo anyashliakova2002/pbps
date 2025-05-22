@@ -7,6 +7,8 @@ static const char base64_table[] =
 static const char base64_pad = '=';
 
 char *base64_decode(const char *src) {
+    if (!src || strlen(src) > MAX_B64_LEN) return NULL;
+    
     size_t len = strlen(src);
     if (len % 4 != 0) return NULL;
     
@@ -19,16 +21,16 @@ char *base64_decode(const char *src) {
     if (!output) return NULL;
     
     for (size_t i = 0, j = 0; i < len;) {
-        uint32_t sextet_a = src[i] == base64_pad ? 0 & i++ : strchr(base64_table, src[i++]) - base64_table;
-        uint32_t sextet_b = src[i] == base64_pad ? 0 & i++ : strchr(base64_table, src[i++]) - base64_table;
-        uint32_t sextet_c = src[i] == base64_pad ? 0 & i++ : strchr(base64_table, src[i++]) - base64_table;
-        uint32_t sextet_d = src[i] == base64_pad ? 0 & i++ : strchr(base64_table, src[i++]) - base64_table;
+        uint32_t sextet_a = src[i] == base64_pad ? 0 : strchr(base64_table, src[i++]) - base64_table;
+        uint32_t sextet_b = src[i] == base64_pad ? 0 : strchr(base64_table, src[i++]) - base64_table;
+        uint32_t sextet_c = src[i] == base64_pad ? 0 : strchr(base64_table, src[i++]) - base64_table;
+        uint32_t sextet_d = src[i] == base64_pad ? 0 : strchr(base64_table, src[i++]) - base64_table;
         
-        uint32_t triple = (sextet_a << 3 * 6) + (sextet_b << 2 * 6) + (sextet_c << 1 * 6) + (sextet_d << 0 * 6);
+        uint32_t triple = (sextet_a << 18) + (sextet_b << 12) + (sextet_c << 6) + sextet_d;
         
-        if (j < output_len) output[j++] = (triple >> 2 * 8) & 0xFF;
-        if (j < output_len) output[j++] = (triple >> 1 * 8) & 0xFF;
-        if (j < output_len) output[j++] = (triple >> 0 * 8) & 0xFF;
+        if (j < output_len) output[j++] = (triple >> 16) & 0xFF;
+        if (j < output_len) output[j++] = (triple >> 8) & 0xFF;
+        if (j < output_len) output[j++] = triple & 0xFF;
     }
     
     output[output_len] = '\0';
