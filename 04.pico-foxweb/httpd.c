@@ -2,26 +2,14 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <unistd.h>
 #include <sys/mman.h>
 #include <signal.h>
 #include <ctype.h>
-#include <stdlib.h>
-#include <string.h>
-#include <syslog.h>
-#include <errno.h>
-
-#define MAX_CONNECTIONS 1000
-#define BUF_SIZE 65535
-#define QUEUE_SIZE 1000000
-#define LOG_FILE "/var/log/foxweb.log"
 
 static int listenfd;
 int *clients;
 static char *buf;
-auth_attempt auth_history[MAX_CONNECTIONS];
 
-/* SSL initialization */
 void init_openssl() {
     SSL_load_error_strings();
     OpenSSL_add_ssl_algorithms();
@@ -67,7 +55,6 @@ void cleanup_openssl() {
     EVP_cleanup();
 }
 
-/* PAM authentication */
 static int pam_conv_func(int num_msg, const struct pam_message **msg,
                         struct pam_response **resp, void *appdata_ptr) {
     pam_conv_data *data = (pam_conv_data *)appdata_ptr;
@@ -130,7 +117,6 @@ int pam_authenticate_user(const char *username, const char *password) {
     return 1;
 }
 
-/* Rate limiting */
 int check_auth_limit(const char *ip) {
     time_t now = time(NULL);
     
@@ -147,7 +133,6 @@ int check_auth_limit(const char *ip) {
         }
     }
     
-    // Add new entry
     for (int i = 0; i < MAX_CONNECTIONS; i++) {
         if (auth_history[i].ip[0] == '\0') {
             strncpy(auth_history[i].ip, ip, INET_ADDRSTRLEN);
@@ -172,7 +157,6 @@ void log_failed_auth(const char *ip, const char *username) {
     }
 }
 
-/* Logging */
 void log_access(const char *status, int response_size) {
     FILE *log_file = fopen(LOG_FILE, "a");
     if (!log_file) {
@@ -195,41 +179,6 @@ void log_access(const char *status, int response_size) {
     fclose(log_file);
 }
 
-/* Server functions */
-void start_server(const char *port) {
-    struct addrinfo hints, *res, *p;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-
-    if (getaddrinfo(NULL, port, &hints, &res) != 0) {
-        syslog(LOG_ERR, "getaddrinfo() error: %s", strerror(errno));
-        exit(1);
-    }
-
-    for (p = res; p != NULL; p = p->ai_next) {
-        int option = 1;
-        listenfd = socket(p->ai_family, p->ai_socktype, 0);
-        setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
-        if (listenfd == -1) continue;
-        if (bind(listenfd, p->ai_addr, p->ai_addrlen) == 0) break;
-    }
-
-    if (p == NULL) {
-        syslog(LOG_ERR, "socket() or bind() error: %s", strerror(errno));
-        exit(1);
-    }
-
-    freeaddrinfo(res);
-
-    if (listen(listenfd, QUEUE_SIZE) != 0) {
-        syslog(LOG_ERR, "listen() error: %s", strerror(errno));
-        exit(1);
-    }
-}
-
-/* Request handling */
 char *request_header(const char *name) {
     header_t *h = reqhdr;
     while (h->name) {
@@ -305,7 +254,6 @@ void respond(int slot) {
         else
             qs = uri - 1;
 
-        /* Parse headers */
         header_t *h = reqhdr;
         char *t, *t2;
         while (h < reqhdr + 16) {
@@ -323,13 +271,11 @@ void respond(int slot) {
             if (t[1] == '\r' && t[2] == '\n') break;
         }
 
-        /* Handle payload */
         t = strtok(NULL, "\r\n");
         t2 = request_header("Content-Length");
         payload = t;
         payload_size = t2 ? atol(t2) : (rcvd - (t - buf));
 
-        /* Process request */
         int clientfd = clients[slot];
         dup2(clientfd, STDOUT_FILENO);
         close(clientfd);
@@ -343,6 +289,39 @@ void respond(int slot) {
 
 cleanup:
     free(buf);
+}
+
+void start_server(const char *port) {
+    struct addrinfo hints, *res, *p;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    if (getaddrinfo(NULL, port, &hints, &res) != 0) {
+        syslog(LOG_ERR, "getaddrinfo() error: %s", strerror(errno));
+        exit(1);
+    }
+
+    for (p = res; p != NULL; p = p->ai_next) {
+        int option = 1;
+        listenfd = socket(p->ai_family, p->ai_socktype, 0);
+        setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &option, sizeof(option));
+        if (listenfd == -1) continue;
+        if (bind(listenfd, p->ai_addr, p->ai_addrlen) == 0) break;
+    }
+
+    if (p == NULL) {
+        syslog(LOG_ERR, "socket() or bind() error: %s", strerror(errno));
+        exit(1);
+    }
+
+    freeaddrinfo(res);
+
+    if (listen(listenfd, QUEUE_SIZE) != 0) {
+        syslog(LOG_ERR, "listen() error: %s", strerror(errno));
+        exit(1);
+    }
 }
 
 void serve_forever(const char *PORT) {
