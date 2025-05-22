@@ -10,10 +10,12 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <time.h>
 
 #define MAX_CONNECTIONS 1000
 #define BUF_SIZE 65535
 #define QUEUE_SIZE 1000000
+#define LOG_FILE "/var/log/foxweb.log"
 
 static int listenfd;
 int *clients;
@@ -21,61 +23,85 @@ static void start_server(const char *);
 static void respond(int);
 
 static char *buf;
+char *client_ip;
 
 // Client request
-char *method, // "GET" or "POST"
-    *uri,     // "/index.html" things before '?'
-    *qs,      // "a=1&b=2" things after  '?'
-    *prot,    // "HTTP/1.1"
-    *payload; // for POST
-
+char *method, *uri, *qs, *prot, *payload;
 int payload_size;
 
-void serve_forever(const char *PORT) {
-  struct sockaddr_in clientaddr;
-  socklen_t addrlen;
-
-  int slot = 0;
-
-  printf("Server started %shttp://127.0.0.1:%s%s\n", "\033[92m", PORT,
-         "\033[0m");
-
-  // create shared memory for client slot array
-  clients = mmap(NULL, sizeof(*clients) * MAX_CONNECTIONS,
-                 PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
-
-  // Setting all elements to -1: signifies there is no client connected
-  int i;
-  for (i = 0; i < MAX_CONNECTIONS; i++)
-    clients[i] = -1;
-  start_server(PORT);
-
-  // Ignore SIGCHLD to avoid zombie threads
-  signal(SIGCHLD, SIG_IGN);
-
-  // ACCEPT connections
-  while (1) {
-    addrlen = sizeof(clientaddr);
-    clients[slot] = accept(listenfd, (struct sockaddr *)&clientaddr, &addrlen);
-
-    if (clients[slot] < 0) {
-      perror("accept() error");
-      exit(1);
-    } else {
-      if (fork() == 0) {
-        close(listenfd);
-        respond(slot);
-        close(clients[slot]);
-        clients[slot] = -1;
-        exit(0);
-      } else {
-        close(clients[slot]);
-      }
+void log_access(const char *status, int response_size) {
+    FILE *log_file = fopen(LOG_FILE, "a");
+    if (log_file == NULL) {
+        perror("Failed to open log file");
+        return;
     }
 
-    while (clients[slot] != -1)
-      slot = (slot + 1) % MAX_CONNECTIONS;
-  }
+    time_t now;
+    time(&now);
+    struct tm *tm = localtime(&now);
+    char timestamp[128];
+    strftime(timestamp, sizeof(timestamp), "%d/%b/%Y:%H:%M:%S %z", tm);
+
+    const char *user_agent = request_header("User-Agent");
+    if (!user_agent) user_agent = "-";
+    
+    const char *referer = request_header("Referer");
+    if (!referer) referer = "-";
+
+    fprintf(log_file, "%s - - [%s] \"%s %s %s\" %s %d \"%s\" \"%s\"\n",
+            client_ip,
+            timestamp,
+            method,
+            uri,
+            prot,
+            status,
+            response_size,
+            referer,
+            user_agent);
+
+    fclose(log_file);
+}
+
+void serve_forever(const char *PORT) {
+    struct sockaddr_in clientaddr;
+    socklen_t addrlen;
+    int slot = 0;
+
+    printf("Server started %shttp://127.0.0.1:%s%s\n", "\033[92m", PORT, "\033[0m");
+
+    clients = mmap(NULL, sizeof(*clients) * MAX_CONNECTIONS,
+                  PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+
+    int i;
+    for (i = 0; i < MAX_CONNECTIONS; i++)
+        clients[i] = -1;
+    start_server(PORT);
+
+    signal(SIGCHLD, SIG_IGN);
+
+    while (1) {
+        addrlen = sizeof(clientaddr);
+        clients[slot] = accept(listenfd, (struct sockaddr *)&clientaddr, &addrlen);
+
+        if (clients[slot] < 0) {
+            perror("accept() error");
+            exit(1);
+        } else {
+            client_ip = inet_ntoa(clientaddr.sin_addr);
+            if (fork() == 0) {
+                close(listenfd);
+                respond(slot);
+                close(clients[slot]);
+                clients[slot] = -1;
+                exit(0);
+            } else {
+                close(clients[slot]);
+            }
+        }
+
+        while (clients[slot] != -1)
+            slot = (slot + 1) % MAX_CONNECTIONS;
+    }
 }
 
 // start server
