@@ -1,34 +1,26 @@
-INSTALL_DIR=/usr/local/bin
-SERVICE_FILE=/etc/systemd/system/PICOFoxweb.service
-
 all: PICOFoxweb
 
 clean:
 	@rm -rf *.o
 	@rm -rf PICOFoxweb
 
-PICOFoxweb: main.o httpd.o
-	gcc -o PICOFoxweb $^
+PICOFoxweb: main.o httpd.o base64.o
+	gcc -o PICOFoxweb $^ -lpam -lssl -lcrypto
 
 main.o: main.c httpd.h
-	gcc -c -o main.o main.c
+	gcc -c -o main.o main.c -Wall -Wextra
 
 httpd.o: httpd.c httpd.h
-	gcc -c -o httpd.o httpd.c
+	gcc -c -o httpd.o httpd.c -Wall -Wextra
 
-install: PICOFoxweb
-	install -m 755 PICOFoxweb $(INSTALL_DIR)
-	install -m 644 PICOFoxweb.service $(SERVICE_FILE)
-	systemctl daemon-reexec
-	systemctl daemon-reload
-	systemctl enable PICOFoxweb.service
-	systemctl start PICOFoxweb.service
-	@echo "Service installed and started."
+base64.o: base64.c httpd.h
+	gcc -c -o base64.o base64.c -Wall -Wextra
 
-uninstall:
-	systemctl stop PICOFoxweb.service || true
-	systemctl disable PICOFoxweb.service || true
-	rm -f $(SERVICE_FILE)
-	rm -f $(INSTALL_DIR)/PICOFoxweb
-	systemctl daemon-reload
-	@echo "Service uninstalled."
+install:
+	sudo cp PICOFoxweb /usr/local/bin/
+	sudo mkdir -p /var/log/
+	sudo touch /var/log/foxweb.log
+	sudo chmod 666 /var/log/foxweb.log
+	sudo cp pam-config /etc/pam.d/httpd
+
+.PHONY: all clean install
