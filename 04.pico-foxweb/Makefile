@@ -1,26 +1,30 @@
+CC = gcc
+CFLAGS = -Wall -Wextra -O2 -fstack-protector-strong
+LDFLAGS = -lpam -lssl -lcrypto -Wl,-z,now
+
 all: PICOFoxweb
 
-clean:
-	@rm -rf *.o
-	@rm -rf PICOFoxweb
-
 PICOFoxweb: main.o httpd.o base64.o
-	gcc -o PICOFoxweb $^ -lpam -lssl -lcrypto
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 main.o: main.c httpd.h
-	gcc -c -o main.o main.c -Wall -Wextra
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 httpd.o: httpd.c httpd.h
-	gcc -c -o httpd.o httpd.c -Wall -Wextra
+	$(CC) $(CFLAGS) -c -o $@ $<
 
 base64.o: base64.c httpd.h
-	gcc -c -o base64.o base64.c -Wall -Wextra
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -f *.o PICOFoxweb
 
 install:
-	sudo cp PICOFoxweb /usr/local/bin/
-	sudo mkdir -p /var/log/
-	sudo touch /var/log/foxweb.log
-	sudo chmod 666 /var/log/foxweb.log
-	sudo cp pam-config /etc/pam.d/httpd
+	install -m 755 PICOFoxweb /usr/local/bin/
+	install -d /var/log/
+	touch /var/log/foxweb.log
+	chown root:adm /var/log/foxweb.log
+	chmod 640 /var/log/foxweb.log
+	[ -f /etc/pam.d/httpd ] || install -m 644 pam-config /etc/pam.d/httpd
 
 .PHONY: all clean install
